@@ -1,0 +1,72 @@
+{
+  "name": "Plataforma Odontológica",
+  "version": 1,
+  "color": {
+    "themes": [
+      {"id": "light", "name": "Light"},
+      {"id": "dark", "name": "Dark"}
+    ],
+    "tokens": [
+      {"name": "brand-50", "value": "#ECF3FF", "usage": "Fundo claro para badge primário e ícone ativo."},
+      {"name": "brand-500", "value": "#465FFF", "usage": "Cor principal — botões, links ativos, barras de gráfico."},
+      {"name": "gray-50", "value": "#F9FAFB", "usage": "Swatch base do fundo de página no tema claro."},
+      {"name": "gray-100", "value": "#F2F4F7", "usage": "Fundo de ícone/badge neutro ('light')."},
+      {"name": "gray-200", "value": "#E4E7EC", "usage": "Swatch base de borda no tema claro."},
+      {"name": "gray-500", "value": "#667085", "usage": "Texto secundário, cabeçalho de tabela."},
+      {"name": "gray-700", "value": "#344054", "usage": "Label de formulário."},
+      {"name": "gray-800", "value": "#1D2939", "usage": "Swatch base de texto principal no tema claro."},
+      {"name": "gray-900", "value": "#101828", "usage": "Swatch base de fundo de card/sidebar no tema escuro."},
+      {"name": "white", "value": "#FFFFFF", "usage": "Fundo de card, sidebar e header no tema claro."},
+      {"name": "success-solid", "value": "#12B76A", "usage": "Fundo sólido de badge de sucesso (ênfase/alerta)."},
+      {"name": "success-text", "value": "#039855", "usage": "Texto de status de sucesso sobre fundo claro."},
+      {"name": "success-light", "value": "#ECFDF3", "usage": "Fundo claro de badge de sucesso."},
+      {"name": "error-solid", "value": "#F04438", "usage": "Fundo sólido de badge de erro."},
+      {"name": "error-text", "value": "#D92D20", "usage": "Texto de status de erro sobre fundo claro."},
+      {"name": "error-light", "value": "#FEF3F2", "usage": "Fundo claro de badge de erro."},
+      {"name": "warning-solid", "value": "#F79009", "usage": "Fundo sólido de badge de pendência/alerta."},
+      {"name": "warning-text", "value": "#DC6803", "usage": "Texto de status de pendência sobre fundo claro."},
+      {"name": "warning-light", "value": "#FFFAEB", "usage": "Fundo claro de badge de pendência."},
+      {"name": "info-solid", "value": "#0BA5EC", "usage": "Cor de status informativo (sólido e texto — a extração não distinguiu os dois)."},
+      {"name": "info-light", "value": "#F0F9FF", "usage": "Fundo claro de badge informativo."},
+      {"name": "surface-page", "value": {"light": "{gray-50}", "dark": "{gray-900}"}, "usage": "Fundo da página, atrás dos cards."},
+      {"name": "surface-card", "value": {"light": "{white}", "dark": "{gray-900}"}, "usage": "Fundo de card, sidebar e header."},
+      {"name": "border-default", "value": {"light": "{gray-200}", "dark": "{gray-800}"}, "usage": "Borda de card, input e tabela."},
+      {"name": "text-primary", "value": {"light": "{gray-800}", "dark": "rgba(255,255,255,0.9)"}, "usage": "Texto principal e títulos. Dark = aproximação de 'white/90' citada na extração, não auditada por contraste."},
+      {"name": "text-secondary", "value": {"light": "{gray-500}"}, "usage": "Texto secundário, cabeçalho de tabela. Valor de dark não foi capturado na extração — herda o claro; revisar antes de usar em produção."},
+      {"name": "text-label", "value": {"light": "{gray-700}"}, "usage": "Label de formulário. Valor de dark não foi capturado na extração — herda o claro; revisar antes de usar em produção."}
+    ]
+  },
+  "type": {
+    "families": {
+      "sans": "\"Outfit\", system-ui, sans-serif"
+    },
+    "groups": [
+      {
+        "name": "Text",
+        "family": "sans",
+        "styles": [
+          {"name": "page-title", "fontSize": "20px", "lineHeight": "28px", "fontWeight": 600},
+          {"name": "form-label", "fontSize": "14px", "lineHeight": "20px", "fontWeight": 500},
+          {"name": "body", "fontSize": "14px", "lineHeight": "20px", "fontWeight": 400},
+          {"name": "stat-number", "fontSize": "28px", "lineHeight": "34px", "fontWeight": 700},
+          {"name": "badge", "fontSize": "12px", "lineHeight": "16px", "fontWeight": 500}
+        ]
+      }
+    ]
+  },
+  "spacing": {
+    "tokens": [
+      {"name": "card-padding-mobile", "value": "20px", "usage": "Padding de card em telas pequenas (p-5)."},
+      {"name": "card-padding-desktop", "value": "24px", "usage": "Padding de card em telas grandes (md:p-6)."},
+      {"name": "badge-padding-x", "value": "10px", "usage": "Padding horizontal de badge (px-2.5)."},
+      {"name": "badge-padding-y", "value": "2px", "usage": "Padding vertical de badge (py-0.5)."}
+    ]
+  },
+  "radius": {
+    "tokens": [
+      {"name": "radius-card", "value": "16px", "usage": "Cards e containers principais (rounded-2xl)."},
+      {"name": "radius-control", "value": "8px", "usage": "Botões e inputs (rounded-lg)."},
+      {"name": "radius-pill", "value": "9999px", "usage": "Badges e pills (rounded-full)."}
+    ]
+  }
+}
