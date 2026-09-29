@@ -54,6 +54,24 @@ cicla a paleta por índice (`ClinicsService.create()`/`UsersService.create()`
 minúsculo (`@/lib/palette-colors`); `fromApiColorToken()`/`toApiColorToken()`
 em `location-colors.ts` fazem a conversão de caixa.
 
+**`User.roles`** (2026-09-26, R1, PR #19): `Role[]` no lugar do antigo
+`role` único — um usuário pode ter mais de um papel (ex.: dono da clínica
+que também atende = `[ADMIN, DENTIST]`). Vazio só pro Super Admin. Migração
+em dois PRs (**expandir → contrair**): o #19 criou `roles` e copiou
+`[role]` mantendo `role` sem uso (a API antiga segue funcionando durante o
+deploy no Render); o **#20** (mergeado depois que o deploy do #19 ficou Live)
+repreenche quem a API antiga criou no intervalo e faz `DROP COLUMN "role"`.
+Desde então `User` só tem `roles`.
+Filtros usam `roles: { has: "DENTIST" }`.
+
+**`RefreshSession`** (2026-09-26, S3, PR #17): uma linha por refresh token.
+Guarda só o **hash SHA-256** do token (o token é opaco, 32 bytes aleatórios,
+e só existe no cookie), `familyId` (= um login num navegador), `expiresAt`,
+`revokedAt`, `replacedById`, `userAgent`, `ip`. **Sem `organizationId`** de
+propósito: a sessão é do usuário e é consultada no refresh, antes de existir
+contexto de tenant (fica fora da extension, e o teste de cobertura do S5
+continua passando sem exceção). Ver "Autenticação e papéis" abaixo.
+
 ### Multi-tenancy (2026-09-17, **revisado no mesmo dia** — ver aviso abaixo)
 
 Todo model de negócio acima carrega `organizationId` (14 models, adicionado
@@ -76,14 +94,14 @@ desenho de isolamento por `organizationId` nos 14 models de negócio, a Prisma
 Client Extension, o `TenantContextInterceptor`. O que mudou:
 
 - `User` agora tem `organizationId` **direto** (não via tabela de junção),
-  nullable — `null` só pra Super Admin (ver abaixo). `role` voltou a viver em
-  `User` (nullable pelo mesmo motivo).
+  nullable — `null` só pra Super Admin (ver abaixo). O papel voltou a viver em
+  `User` — desde 2026-09-26 como lista `roles` (R1; antes `role` único).
 - E-mail deixou de ser único globalmente — só dentro do tenant
   (`@@unique([organizationId, email])`). A mesma pessoa em 2 clínicas = 2
   contas completamente separadas, sem nenhuma referência cruzada no banco.
 - `nickname` (opcional, único globalmente) permite logar sem escolher
   organização mesmo se o e-mail se repetir entre tenants.
-- **Super Admin** (`User.isSuperAdmin`, `organizationId: null`, `role: null`)
+- **Super Admin** (`User.isSuperAdmin`, `organizationId: null`, `roles: []`)
   é a identidade da plataforma (o Vitor), fora de qualquer organização — cria
   clínicas novas pelo módulo `platform` (ver abaixo). Nunca é a mesma conta
   que administra uma clínica.
@@ -92,11 +110,16 @@ Client Extension, o `TenantContextInterceptor`. O que mudou:
   organização (`users.service.ts`, checado em `update()`). Transferência de
   capitania é exclusiva do Super Admin (`PATCH platform/organizations/:id/founding-admin`),
   nunca self-service.
-- **Login multi-tenant em 2 passos**: `POST auth/lookup { identifier }`
-  (e-mail ou nickname) devolve se precisa escolher organização
-  (`requiresOrganizationSelection`) antes de pedir senha — só acontece quando
-  o e-mail existe em mais de uma organização. `POST auth/login` aceita
-  `organizationId` opcional, obrigatório só nesse caso.
+- **Login multi-tenant sem vazar organizações** (2026-09-26, S1, PR #15 —
+  substituiu o login em 2 passos com `POST auth/lookup`, que era público e
+  devolvia os nomes das organizações de qualquer e-mail): `POST auth/login
+  { identifier, password, organizationId? }` valida a senha **antes** de
+  revelar qualquer organização. Nenhuma conta confere → `401` genérico (e-mail
+  inexistente roda `bcrypt.compare` contra um hash fixo, pro tempo não
+  denunciar); uma → tokens; mais de uma sem `organizationId` → `200` sem
+  tokens com `{ requiresOrganizationSelection: true, accounts }`, só as
+  organizações em que a senha conferiu. O front mostra a escolha e reenvia com
+  `organizationId` (senha validada de novo).
 - `Organization` ganhou `type` (`TenantType`) e `status`
   (`ACTIVE`/`SUSPENDED`/`DELETED`, soft delete). `TenantType.FREELANCER`
   ganhou existência real em 2026-09-22 (PR #10, migration aditiva `ALTER
@@ -204,6 +227,18 @@ CI). `test/tenant-extension.e2e-spec.ts` prova a extension isoladamente
 organizations. Rodando no CI (`.github/workflows/ci.yml`, serviço Postgres
 dedicado).
 
+**Suítes e2e em 2026-09-26** (10 suítes, 82 testes na `main`):
+`tenant-extension`, `tenant-isolation`, `platform-stats`,
+`tenant-models-coverage` (S5 — todo model com `organizationId` está em
+`TENANT_SCOPED_MODELS`, via `Prisma.dmmf`), `route-policy-coverage` (S4 —
+toda rota declara política; lista travada de rotas públicas), `auth-login`
+(S1), `rate-limit` (S2), `auth-sessions` (S3), `user-roles` (R1) e
+`user-roles-migration` (R1 — roda a **cadeia real** de migrations num schema
+Postgres descartável e confere o preenchimento de `roles`). Todas sobem a app
+com `configureApp()` (`src/app.setup.ts`), os mesmos middlewares da produção.
+Rate limit desligado na suíte (`RATE_LIMIT_DISABLED` em `test/env-setup.ts`),
+exceto em `rate-limit.e2e-spec.ts`.
+
 **Regra de repasse**: `repasse = grossValue * (repassePercentage / 100)`,
 incide sobre o valor bruto, nunca sobre bruto menos material.
 
@@ -218,16 +253,41 @@ seguindo FEFO (usa primeiro o lote que vence antes) — ver
 
 ### Autenticação e papéis (`Role`: `ADMIN` / `DENTIST` / `RECEPTIONIST`)
 
-JWT access (15min, em memória no front) + refresh (30d, cookie httpOnly).
-**Sem endpoint público de registro** — o primeiro usuário/organização nascem
-do `prisma/seed.ts`; a partir daí só o admin cria novos usuários, pelo painel.
+JWT access (15min, em memória no front) + refresh token **opaco e revogável**
+(30d, cookie httpOnly `refresh_token`). **Sem endpoint público de registro** —
+o primeiro usuário/organização nascem do `prisma/seed.ts`; a partir daí só o
+admin cria novos usuários, pelo painel.
 
-Payload do JWT: `{ sub, email, organizationId, role, isSuperAdmin }` —
-`organizationId`/`role` nullable (só pra Super Admin). Login é em 2 passos —
-ver seção Multi-tenancy acima (`POST auth/lookup` decide se precisa escolher
-organização antes de `POST auth/login`). `jwt.strategy.ts` faz um único
-`findUnique` de `User` a cada request (mais simples que a versão com
-Membership — não precisa re-buscar uma segunda tabela).
+Payload do JWT de acesso: `{ sub, email, organizationId, roles, isSuperAdmin }`
+— `organizationId` null e `roles` vazio só pro Super Admin. Login: ver seção
+Multi-tenancy acima (S1). `jwt.strategy.ts` relê o `User` do banco a cada
+request, então papéis, ativo e organização valem sempre o estado atual (um
+access token antigo com `role` no payload continua funcionando).
+
+**Sessões de refresh revogáveis com rotação** (2026-09-26, S3, PR #17 —
+`modules/sessions/refresh-sessions.service.ts`). Antes o refresh era um JWT de
+30 dias sem estado: o logout só apagava o cookie e um token vazado valia até
+expirar. Agora:
+- cada `POST /auth/refresh` revoga a sessão atual e cria a próxima na mesma
+  família (`replacedById`); **reusar um token já trocado revoga a família
+  inteira** (sinal de roubo) e responde 401;
+- a reivindicação é um `UPDATE … WHERE revokedAt IS NULL` fora de transação
+  interativa — ver [[Problemas Conhecidos]] (P2028 do Prisma com duas
+  transações interativas disputando a mesma linha);
+- `POST /auth/logout` revoga a família do navegador atual; `POST
+  /auth/logout-all` revoga todas as sessões do usuário; desativar um usuário
+  também revoga;
+- refresh recusado (401) apaga o cookie; erro de outro tipo não;
+- `JWT_REFRESH_SECRET` deixou de existir.
+
+**Rate limit e headers** (2026-09-26, S2, PR #16): `@nestjs/throttler` como
+**primeiro** guard global, por IP do cliente — login 5/min, refresh 30/min
+(folga porque o front faz refresh a cada carregamento de página e a clínica
+sai por um IP só), demais rotas 100/min, `/health` sem limite. Valores em
+`common/rate-limit/rate-limit.config.ts`. `trust proxy` com número de saltos
+(`TRUST_PROXY_HOPS`, padrão 1 = Render). `helmet` com CSP `default-src 'none'`
+(API só JSON). Tudo montado em `src/app.setup.ts` (`configureApp()`), usado
+pelo `main.ts` e pelos testes.
 
 `SuperAdminGuard` (`common/guards/super-admin.guard.ts`) checa `isSuperAdmin`
 — usado via `@UseGuards` só no `PlatformController`, não é guard global (ao
@@ -242,8 +302,24 @@ testado de verdade em produção.
 
 `RolesGuard` (`common/guards/roles.guard.ts` + decorator `@Roles(...)`) — não
 existia no hubassistent. Registrado como `APP_GUARD` global, depois do
-`JwtAuthGuard`. Tabela de quem acessa cada módulo (Super Admin não aparece —
-não bate em nenhum `@Roles(...)`, só acessa `/platform` via `SuperAdminGuard`):
+`ThrottlerGuard` e do `JwtAuthGuard`. Desde 2026-09-26:
+- **nega por padrão** (S4, PR #14): rota sem `@Public`, `@Roles` ou
+  `@AllowAuthenticated` (qualquer logado) responde 403; a política do handler
+  vence a da classe. O teste `route-policy-coverage` percorre todos os
+  handlers e falha se algum não tiver política — e trava a lista de rotas
+  públicas (`POST auth/login`, `POST auth/refresh`, `GET health`);
+- **matriz central `ACCESS`** (PR #18, `packages/shared-types/src/access.ts`):
+  capacidade → papéis (`patients.read`, `clinical.write`, `users.manage`…).
+  A API usa `@Roles(...ACCESS["capacidade"])` e o front `can(user,
+  "capacidade")` — **mudar quem acessa algo = mudar só o `ACCESS`**. Regras
+  por tipo de organização (termos financeiros e criação de consultório só pra
+  `FREELANCER`, eixo da Agenda) ficam fora da matriz, nos services;
+- **vários papéis** (R1, PR #19): libera se **qualquer** papel do usuário
+  estiver na lista.
+
+Tabela de quem acessa cada módulo — reflete o `ACCESS` em 2026-09-26 (Super
+Admin não aparece — não bate em nenhum `@Roles(...)`, só acessa `/platform`
+via `SuperAdminGuard`):
 
 | Módulo | ADMIN | DENTIST | RECEPTIONIST |
 |---|---|---|---|
@@ -276,13 +352,23 @@ tela mockada. Ajustado só o suficiente: `@Roles` do controller ganhou
 ADMIN não bate nesse endpoint hoje porque é 100% mockada; se um dia os
 agendamentos virarem reais, esse `@Roles` também precisa ser revisado.
 
+**Gestão de usuários com a lista de papéis** (`users.service.ts`, R1), nesta
+ordem: (1) a organização **mantém pelo menos um ADMIN ativo**; (2) o admin não
+se desativa nem remove o próprio ADMIN; (3) **capitania como antes** — só o
+fundador edita/desativa outro admin (a tarefa do R1 falava em "admin não edita
+admin"; o Vitor decidiu manter a capitania); (4) todo dentista tem cor
+(atribuída por índice na criação e ao ganhar DENTIST). Estatísticas da
+plataforma: usuário com 2 papéis conta nos dois; `usersByRole.total` conta
+pessoas.
+
 Um `DecimalInterceptor` global (`common/interceptors/decimal.interceptor.ts`)
 converte todo `Prisma.Decimal` pra `number` antes de serializar — ver
 [[Problemas Conhecidos]] pro bug real que isso corrigiu.
 
 ### Módulos
 
-`auth`, `users` (painel do Tenant Admin, só ADMIN), `organization`
+`auth`, `sessions` (sessões de refresh, usado por `auth` e `users`), `users`
+(painel do Tenant Admin, só ADMIN), `organization`
 (`GET /organization`, qualquer papel autenticado — nome da clínica + lista de
 membros, ver [[Funcionalidades e Endpoints]]), `platform` (só Super Admin —
 criar/listar organizações, transferir capitania), `patients`, `anamnesis`,
@@ -300,29 +386,44 @@ pra timeline) migrou os tokens do Tailwind pro design system oficial — ver
 ```
 apps/web/src/
 ├── components/{app-shell.tsx, sidebar.tsx, ui/*}
-├── features/{auth,admin,patients,budgets,agenda,financeiro,materials,procedures,clinics,dashboard}/
-├── lib/{api-client.ts, auth-context.tsx, palette-colors.ts, initials.ts, use-click-outside.ts}
+├── features/{auth,admin,agenda,clinics,dashboard,financeiro,materials,my-clinic,patients,platform,procedures}/
+├── lib/{access.ts, api-client.ts, auth-context.tsx, palette-colors.ts, initials.ts, use-click-outside.ts}
 └── routes/{protected-route.tsx, home-route.tsx}
 ```
+(Orçamento, anamnese, prontuário e odontograma são abas em
+`features/patients/tabs/`.)
 
-`ProtectedRoute` aceita `roles?: Role[]` e/ou `superAdminOnly?: boolean`.
-`HomeRoute` decide o que renderizar em `/`: `isSuperAdmin` primeiro (redireciona
-pra `/platform`), senão `role === "ADMIN"` (`/admin/users`), senão
-`DashboardPage`.
+**Acesso no front** (PR #18): toda decisão "este usuário pode X?" passa por
+`can(user, capacidade)` (`lib/access.ts`, lê `user.roles`), com a mesma matriz
+`ACCESS` da API — nenhuma comparação direta com papel. `ProtectedRoute` aceita
+`capability?` e/ou `superAdminOnly?`. `HomeRoute`: Super Admin → `/platform`;
+quem não tem `dashboard.view` mas tem `users.manage` (ADMIN puro) →
+`/admin/users`; senão `DashboardPage` (um `[ADMIN, DENTIST]` cai no
+dashboard). Rótulo do papel na sidebar junta a lista ("Admin · Dentista").
+
+**Tela de usuários** (R1 + PR #21): checkboxes de papéis (criação e tabela);
+na própria linha ADMIN fica travado; o último papel não desmarca; dar ou tirar
+ADMIN de outra pessoa pede confirmação num diálogo da app (portal no
+`<body>`) antes do PATCH — PR #21, na `main` desde 2026-09-26.
 
 **Navegação (2026-09-21)**: o antigo menu horizontal (`layout.tsx`) foi
 substituído por `app-shell.tsx` + `sidebar.tsx` — sidebar fixa à esquerda
 (240px, colapsável, tooltip no modo colapsado, estado em `localStorage`),
-grupos de nav (Menu/Clínica/Plataforma) com o mesmo filtro por `roles`/
-`superAdminOnly` de antes. `app-shell.tsx` trava em `h-screen overflow-hidden`
+grupos de nav (Menu/Clínica/Plataforma), filtrados por `capability`
+(`can()`) ou `superAdminOnly`. `app-shell.tsx` trava em `h-screen overflow-hidden`
 e só o `<main>` (`min-h-0 overflow-y-auto`) rola — ver bug real corrigido em
 [[Problemas Conhecidos]] (a primeira versão usava `min-h-screen` sem
 `min-h-0`, e a página inteira rolava junto com a sidebar). Super Admin só vê
 "Plataforma" no nav, nada de tenant.
 
 `api-client.ts`: access token em memória, refresh automático via
-`credentials: "include"` quando a API responde 401 (mesmo padrão do
-hubassistent).
+`credentials: "include"` quando a API responde 401 (exceto no próprio
+`/auth/login` e `/auth/refresh`). Como o refresh token é rotacionado e reuso
+derruba a sessão, **só existe um refresh em andamento por vez**
+(`refreshAccessToken()`): na mesma aba, chamadas paralelas esperam a mesma
+promessa; entre abas, a **Web Locks API** serializa — a segunda aba só manda
+o refresh depois da primeira, já com o cookie novo. O `AuthProvider` usa o
+mesmo caminho ao abrir o app (o StrictMode chamava o refresh duas vezes).
 
 ### Padrão "mock primeiro, backend depois" (2026-09-21/22)
 
@@ -344,10 +445,11 @@ migrações de banco. Padrão replicado nas três:
   aparece pra colorir/filtrar — consultórios ou dentistas) **deixou de ser
   mockado**. `useAgendaMockData` foi substituído por `useAgendaData`, com
   `resolveCalendarAxis()` decidindo o eixo real a partir de
-  `organization.type` + papel: `"location"` (freelancer → `Clinic` reais),
-  `"dentist"` (clínica admin/recepcionista → `User` reais `role: DENTIST`
-  via `GET organization/dentists`, `403` de verdade pra `DENTIST`, não mais
-  filtro de UI), `"none"` (clínica dentista, sem sidebar). `dentist-store.ts`
+  `organization.type` + capacidade: `"location"` (freelancer → `Clinic`
+  reais), `"dentist"` (clínica, quem tem `organization.dentists` —
+  admin/recepcionista → `User` reais com `roles has DENTIST` via `GET
+  organization/dentists`, `403` de verdade pra `DENTIST`, não mais filtro de
+  UI), `"none"` (clínica, sem essa capacidade — dentista, sem sidebar). `dentist-store.ts`
   (mock/`localStorage`) foi removido. **O que continua mockado**: os
   agendamentos/eventos do calendário em si (conteúdo, não o roster).
 - Cor arbitrária (sem significado de status, diferente do `Badge` semântico)

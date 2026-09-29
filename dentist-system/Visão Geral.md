@@ -36,7 +36,11 @@ por papel continua exatamente como sempre foi.
 ## Notas relacionadas
 
 **Roadmap** (o que fazer / prioridade):
-- [[Roadmap]] — o que já foi construído vs. o que falta, hub de tudo abaixo
+- [[roadmap-papeis-permissoes-financeiro]] — **roadmap ativo** (desde
+  2026-09-25): papéis, permissões e financeiro, fases 0 a 7, com o progresso
+  de cada item e os PRs
+- [[Roadmap]] — histórico do que já foi construído até 2026-09-22 + evolução
+  SaaS e visão de produto
 
 **Conhecimento** (como as coisas são hoje, referência técnica):
 - [[Funcionalidades e Endpoints]] — **norte funcional**: todo endpoint da API com
@@ -185,3 +189,26 @@ por papel continua exatamente como sempre foi.
   `colorToken` real no schema (PR #12) — os agendamentos/calendários em si
   continuam mockados, só quem aparece na sidebar virou real. Ver [[Roadmap]]
   seção "Feito" pro detalhe técnico de cada PR.
+- **2026-09-25** — análise do projeto a partir do vault gerou
+  [[Pontos de Atenção — Análise 2026-09-25]] (clínica nova sem consultório nem
+  procedimento, agenda e catálogo mockados, recall sem tela…) e
+  [[Responsabilidades por Perfil e Novos Requisitos]] (Super Admin, admin da
+  clínica, dentista da clínica, freelancer). O Vitor consolidou tudo em
+  [[roadmap-papeis-permissoes-financeiro]], com decisões fechadas (D1 a D6) e
+  fases 0 a 7. Ambiente local montado no Windows (Postgres em container
+  Docker) — ver [[Infraestrutura e Deploy]].
+- **2026-09-26** — execução do roadmap novo, um prompt por item, cada um com
+  branch, testes e2e, teste no Chrome, PR e merge com CI verde. **Fase 0 de
+  segurança inteira na `main`**: S5 cobertura do isolamento (#13), S4 RBAC
+  negando por padrão (#14), S1 login sem `auth/lookup` (#15), S2 rate limit +
+  helmet (#16), S3 refresh token opaco, rotativo e revogável (#17). Depois,
+  matriz de permissões centralizada em `ACCESS` (#18) e **R1 múltiplos papéis
+  por usuário** (#19, `role` → `roles[]`, migration expandir → contrair; a
+  parte que remove `role`, #20, foi mergeada depois que o deploy do #19
+  ficou Live); confirmação ao dar/tirar Admin (#21). Suíte e2e foi de 4 para
+  10 arquivos (82 testes). Bugs reais achados no teste no navegador
+  (P2028 do Prisma com transações concorrentes, modal deslocado) estão em
+  [[Problemas Conhecidos]]. Decisões tomadas no caminho (capitania mantida,
+  refresh 30/min, Web Locks entre abas…) em
+  [[roadmap-papeis-permissoes-financeiro#Progresso]]. **Ao fazer o deploy,
+  todos os usuários precisam logar de novo** (S3). Próximo: R3 → P3.

@@ -7,7 +7,14 @@ falta implementar ou mudar.
 
 Convenções globais (valem pra tudo abaixo, não repetidas em cada endpoint):
 - Sem prefixo `/api` — o path do `@Controller` já é o path final (ex.: `auth/login`).
-- Toda rota exige JWT (Bearer access token) exceto as marcadas **público**.
+- Toda rota exige JWT (Bearer access token) exceto as marcadas **público** — e
+  desde 2026-09-26 (S4) toda rota **precisa declarar** quem acessa (`@Roles`,
+  `@AllowAuthenticated` ou `@Public`); sem isso responde `403`. Quem acessa o
+  quê vem da matriz `ACCESS` (`packages/shared-types/src/access.ts`, PR #18).
+  Usuário com vários papéis (R1) acessa se **qualquer** papel estiver na lista.
+- Rate limit por IP (S2): login 5/min, refresh 30/min, demais 100/min,
+  `health` sem limite. Estourou → `429` "Muitas tentativas. Aguarde um minuto
+  e tente novamente."
 - Todo body é validado por Zod (`packages/shared-types`) via `ZodValidationPipe` —
   erro de validação retorna `400` com `{ message, error }` (formato `.flatten()` do Zod).
 - Todo `Decimal` do Prisma (dinheiro, quantidade) já chega como `number` no JSON
@@ -19,41 +26,56 @@ Convenções globais (valem pra tudo abaixo, não repetidas em cada endpoint):
 
 | Rota | Quem acessa |
 |---|---|
-| `POST auth/lookup` | público |
-| `POST auth/login` | público |
-| `POST auth/refresh` | público (lê cookie) |
+| `POST auth/login` | público (5/min por IP) |
+| `POST auth/refresh` | público, lê cookie (30/min por IP) |
 | `POST auth/logout` | qualquer autenticado |
+| `POST auth/logout-all` | qualquer autenticado (2026-09-26, S3) |
 | `GET auth/me` | qualquer autenticado |
 
-**Identidade é isolada por tenant** (2026-09-17, revisado no mesmo dia da
-multi-tenancy — ver [[Arquitetura]]): o mesmo e-mail pode existir em mais de
-uma organização, como contas completamente independentes. Login é em 2 passos:
+~~`POST auth/lookup`~~ — **removido em 2026-09-26 (S1, PR #15)**: era público e
+devolvia os nomes das organizações de qualquer e-mail. Responde `404`.
+
+**Identidade é isolada por tenant** (ver [[Arquitetura]]): o mesmo e-mail pode
+existir em mais de uma organização, como contas independentes e com senhas
+diferentes. O login manda tudo de uma vez e só revela organizações **depois**
+de a senha conferir:
 
 ```json
-// POST auth/lookup
-{ "identifier": "dra.marina@sorrisosaudavel.com.br" }
-// → 201, e-mail existe em só 1 organização (ou nenhuma)
-{ "requiresOrganizationSelection": false, "accounts": [] }
-// → 201, e-mail existe em mais de uma organização
+// POST auth/login — sempre 200 em sucesso (antes 201)
+{ "identifier": "dra.marina@sorrisosaudavel.com.br", "password": "SenhaForte123" }
+// → 200, a senha confere em uma conta: entra direto
+{ "accessToken": "<jwt>" }   // + cookie httpOnly refresh_token
+// → 200, a senha confere em mais de uma conta: SEM tokens e SEM cookie
 { "requiresOrganizationSelection": true, "accounts": [{ "organizationId": "clx0...", "organizationName": "Clínica A" }, { "organizationId": "clx1...", "organizationName": "Clínica B" }] }
+// → 401 "Credenciais inválidas", idêntico pra e-mail inexistente e senha errada
 ```
-`identifier` aceita e-mail **ou** `nickname` (apelido único globalmente,
-opcional) — logar por nickname nunca pede escolha de organização, mesmo que o
-e-mail associado se repita em outro tenant.
+- A lista só traz as organizações em que **a senha conferiu** — nunca as
+  outras contas do mesmo e-mail.
+- Com a lista, o front reenvia `{ identifier, password, organizationId }`; a
+  senha é validada de novo.
+- E-mail inexistente ainda roda um `bcrypt.compare` contra um hash fixo, pro
+  tempo de resposta não revelar se o e-mail existe.
+- `identifier` aceita e-mail **ou** `nickname` (único globalmente) — por
+  nickname nunca há escolha de organização.
+- Conta desativada não entra nem aparece na lista. Super Admin (sem
+  organização) não aparece na lista; com e-mail/senha repetidos, entra pelo
+  nickname.
 
-```json
-// POST auth/login
-{ "identifier": "dra.marina@sorrisosaudavel.com.br", "password": "SenhaForte123", "organizationId": "clx0..." }
-// → 200
-{ "accessToken": "<jwt>" }
-```
-`organizationId` só é obrigatório quando o `lookup` anterior devolveu
-`requiresOrganizationSelection: true` — mandar sem ele nesse caso dá `401`
-(mensagem genérica, igual pra e-mail/senha errados — nunca revela qual dos
-casos aconteceu). Gera access token (15min, em memória no front) + refresh
-token (30 dias, cookie httpOnly).
+**Refresh** (2026-09-26, S3) — sem body, lê o cookie `refresh_token`. O token
+é **opaco** (32 bytes aleatórios; no banco só o SHA-256) e **rotacionado**: a
+cada chamada o atual é revogado e um novo vem no cookie. Token desconhecido,
+expirado ou já trocado → `401` e o cookie é apagado. **Reusar um token já
+trocado revoga a família inteira** (todas as sessões daquele login), porque é
+sinal de roubo.
 
-**Refresh** — sem body, lê o cookie `refresh_token`; reemite os dois tokens (rotação).
+**Logout** revoga no servidor a família do navegador atual (o cookie deixa de
+valer mesmo se alguém copiou). **`logout-all`** revoga todas as sessões do
+usuário em qualquer navegador. Access tokens já emitidos seguem válidos até
+expirar (15 min). Desativar um usuário também revoga as sessões dele.
+
+`GET auth/me` devolve `{ id, email, name, organizationId, roles, isSuperAdmin }`
+(`roles` vazio pro Super Admin).
+
 Não existe endpoint público de cadastro — o primeiro usuário/organização nascem do
 `prisma/seed.ts`; Super Admin cria clínicas novas por `platform/*`, admin da clínica
 cria dentista/recepcionista por `users/*`.
@@ -69,27 +91,39 @@ foi criada — ver [[Arquitetura]]). `:id` nas rotas abaixo é o id do próprio
 revela se aquele e-mail já existe em outra organização.
 
 ```json
-// POST users
-{ "email": "recepcao@sorrisosaudavel.com.br", "password": "Recep2026!", "name": "Juliana Costa", "role": "RECEPTIONIST" }
+// POST users — roles: lista com pelo menos 1 papel, sem repetição (R1, 2026-09-26)
+{ "email": "recepcao@sorrisosaudavel.com.br", "password": "Recep2026!", "name": "Juliana Costa", "roles": ["RECEPTIONIST"] }
 // → 201
-{ "userId": "clx2...", "email": "recepcao@sorrisosaudavel.com.br", "name": "Juliana Costa", "role": "RECEPTIONIST", "active": true, "colorToken": null, "createdAt": "..." }
+{ "userId": "clx2...", "email": "recepcao@sorrisosaudavel.com.br", "name": "Juliana Costa", "roles": ["RECEPTIONIST"], "active": true, "colorToken": null, "createdAt": "..." }
 ```
-**`colorToken` (2026-09-22, PR #12)** — opcional em `POST`/`PATCH users/:id`,
-só relevante pra `role: "DENTIST"` (identidade na sidebar da Agenda). Se
-omitido na criação de um dentista, o serviço cicla a paleta de 5 tokens por
-índice (nº de dentistas já cadastrados no tenant) — mesma lógica que antes
-vivia no front (`dentist-store.ts`, removido).
+`roles` vazio, repetido ou o campo antigo `role` → `400`. Um usuário pode ter
+vários papéis (ex.: `["ADMIN", "DENTIST"]` pro dono da clínica que atende).
+
+**`colorToken`** — opcional em `POST`/`PATCH users/:id`, relevante pra quem tem
+DENTIST (identidade na sidebar da Agenda). Se omitido, o serviço cicla a
+paleta de 5 tokens por índice (nº de dentistas do tenant) — **na criação e
+também quando o usuário ganha DENTIST depois** (R1): todo dentista tem cor.
 ```json
 // PATCH users/:userId
-{ "active": false }
+{ "roles": ["ADMIN", "DENTIST"] }   // ou { "active": false }
 ```
-Duas regras de proteção:
-- Admin não consegue desativar ou rebaixar a **própria** conta (`400`) — evita
-  se trancar fora do sistema.
-- **Capitania da clínica**: se o alvo for `ADMIN` e não for quem está agindo,
-  só o admin **fundador** da organização (`Organization.foundingAdminUserId`)
-  pode editar/desativar (`403` senão). Transferir a capitania não é
-  self-service — só o Super Admin faz isso, via `platform/*`.
+Regras de proteção, nesta ordem:
+1. A organização **mantém pelo menos um ADMIN ativo** (`400` "A organização
+   precisa de pelo menos um admin ativo") — é o que barra o único admin de se
+   rebaixar ou se desativar.
+2. Admin não se desativa nem remove o **próprio** ADMIN (`400` "Você não pode
+   desativar ou rebaixar a própria conta de admin"). Acrescentar papéis a si
+   mesmo mantendo ADMIN é permitido.
+3. **Capitania da clínica**: se o alvo tem ADMIN e não é quem está agindo, só
+   o admin **fundador** (`Organization.foundingAdminUserId`) pode editar/
+   desativar (`403` "Só o admin fundador pode gerenciar outros admins desta
+   clínica"). Transferir a capitania não é self-service — só o Super Admin,
+   via `platform/*`.
+
+Desativar (`active: false`) revoga todas as sessões de refresh do usuário (S3).
+
+Na tela (Usuários), dar ou tirar ADMIN de outra pessoa pede confirmação antes
+do PATCH (PR #21); os demais papéis salvam na hora.
 
 ```json
 // PATCH users/:userId/password — reset de senha (2026-08-03)
@@ -122,8 +156,8 @@ nunca aceita um id de organização por parâmetro — não existe rota tipo
   "name": "Consultório Padrão",
   "type": "CLINIC",
   "members": [
-    { "userId": "clx1...", "name": "Dra. Exemplo", "role": "DENTIST", "active": true },
-    { "userId": "clx2...", "name": "Recepcionista Teste", "role": "RECEPTIONIST", "active": true }
+    { "userId": "clx1...", "name": "Dra. Exemplo", "roles": ["ADMIN", "DENTIST"], "active": true },
+    { "userId": "clx2...", "name": "Recepcionista Teste", "roles": ["RECEPTIONIST"], "active": true }
   ]
 }
 ```
@@ -143,10 +177,11 @@ leitura por enquanto. **`type` (2026-09-22, PR #9)** — expõe
 ```
 Roster real pra sidebar "por dentista" da Agenda (tenant `CLINIC`,
 admin/recepcionista). Rota separada de `GET /organization` de propósito:
-aquela é permissiva pra qualquer papel; esta é `@Roles("ADMIN",
-"RECEPTIONIST")` — `DENTIST` recebe `403` de verdade, não filtro de UI. Só
-lista dentista `active: true` (inativo some do roster, mas continua
-vinculado ao histórico de agendamentos que já existir).
+aquela é permissiva pra qualquer papel; esta é a capacidade
+`organization.dentists` (ADMIN, RECEPTIONIST) — `DENTIST` recebe `403` de
+verdade, não filtro de UI. Lista quem tem `DENTIST` entre os papéis e está
+`active: true` (inativo some do roster, mas continua vinculado ao histórico
+de agendamentos que já existir).
 
 ---
 
@@ -155,7 +190,7 @@ vinculado ao histórico de agendamentos que já existir).
 Painel da plataforma — Vitor, fora de qualquer organização
 (`User.isSuperAdmin: true`, `organizationId: null`). Guardado por um
 `SuperAdminGuard` próprio, não pelo `RolesGuard`/`@Roles(...)` global (Super
-Admin não tem `role` de tenant). Escopo desta rodada: criar/listar/detalhar
+Admin tem `roles: []`; o controller é `@AllowAuthenticated` + `SuperAdminGuard`). Escopo desta rodada: criar/listar/detalhar
 clínicas, transferir capitania, e um dashboard de estatísticas cross-tenant
 (2026-09-18) — cadastro progressivo, LGPD, auditoria, billing e add-ons
 ficam pra depois (ver [[feature - painel-admin-rbac-lgpd]] e a seção
@@ -201,8 +236,13 @@ cria organização tipo `CLINIC` (`POST platform/organizations` não aceita
   "topOrganizationsByAttendance": []
 }
 ```
+**`usersByRole` com vários papéis (R1)**: um usuário com 2 papéis conta **em
+cada** papel; `total` conta **pessoas** (ativas, com pelo menos um papel) —
+então a soma por papel pode passar do `total`. Super Admin fica de fora.
+
 Transferência de capitania nunca é self-service — só existe por este caminho,
-não tem equivalente em `users/*` pro próprio admin fundador se substituir.
+não tem equivalente em `users/*` pro próprio admin fundador se substituir. O
+admin novo precisa ter `ADMIN` entre os papéis.
 
 `GET platform/stats/overview` é o único endpoint do backend inteiro que usa
 o client Prisma sem a extension de isolamento de tenant (token DI
@@ -488,7 +528,9 @@ por essa rota hoje.
 ## health — `health` (público)
 
 `GET health` → `{ "status": "ok" }`. Health check simples, sem checar conexão com o
-banco — usado pra keep-alive/monitoramento em produção (Render).
+banco — usado pra keep-alive/monitoramento em produção (Render). **Fora do rate
+limit** (`@SkipThrottle`, S2): um 429 aqui faria o Render achar que a API caiu.
+Responde com os headers de segurança do `helmet`, como toda rota.
 
 ---
 

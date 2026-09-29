@@ -71,8 +71,36 @@ React Router tratar no client. Corrigido com rewrite catch-all em
   Supabase** — schema é 100% gerenciado pelo Prisma (`prisma migrate deploy`,
   já embutido no `buildCommand` do `render.yaml`).
 
+### Ambiente local no Windows (2026-09-25/26)
+Na máquina Windows do Vitor não há Postgres nativo nem Homebrew: o banco roda
+num **container Docker** `dentist-system-postgres` (`postgres:16`, volume
+`dentist-system-pgdata`, porta presa em `127.0.0.1:5432`,
+`POSTGRES_HOST_AUTH_METHOD=trust` porque o `DATABASE_URL` do `.env` não tem
+senha — formato herdado do Homebrew). Bancos: `dentist_system` (dev) e
+`dentist_system_test` (testes). O Docker Desktop precisa estar aberto; se o
+container parar: `docker start dentist-system-postgres`.
+- **Testes**: exportar `TEST_DATABASE_URL` apontando pra `dentist_system_test`
+  antes de `pnpm test` (o padrão de `test/test-db.ts` usa `$USER`, que não
+  existe no Windows). Os testes apagam organizações/usuários: nunca apontar
+  pro banco de dev nem pra produção.
+- **Primeira vez numa máquina limpa**: `pnpm prisma generate` (senão o client
+  é só um stub) e `pnpm --filter @dentist-system/shared-types build` (senão o
+  `tsc` da API dá TS2307 em massa).
+- **Trocar de branch com migrations diferentes**: o `pnpm test` aplica as
+  migrations no banco de teste; voltar pra uma branch que não tem uma delas
+  deixa o banco à frente do schema ("column does not exist" em quase todos os
+  testes). Desfazer a migration à mão e conferir com `prisma migrate diff
+  --from-schema-datasource … --to-schema-datamodel … --exit-code`. O CI não
+  sofre com isso: cria um banco novo a cada execução.
+- **Contas de teste locais** (senha `senha123456`): `superadmin@local.test`,
+  `admin@local.test`, `dentista@local.test` (seed com envs de teste), as
+  personas `*@example.com` (`prisma/scripts/seed-test-personas.ts`) e
+  `multi@local.test`/`dupla@local.test` (mesmo e-mail em 2 organizações, pra
+  testar o login com escolha).
+
 ### Separação dev/prod
-`apps/api/.env` local aponta pro Postgres do Homebrew (`dentist_system`) —
+`apps/api/.env` local aponta pro Postgres local (`dentist_system`; Homebrew no
+Mac, container Docker no Windows) —
 nunca aponta direto pro Supabase no dia a dia, pra nenhum teste/reset local
 arriscar tocar em dado real da dentista depois que ela começar a usar de
 verdade. Credenciais do Supabase (prod) ficam em `apps/api/.env.local`
@@ -91,14 +119,38 @@ público exigiria rate-limit/confirmação de e-mail antes de considerar.
 
 ## Infra como código (repo)
 - **`render.yaml`** (raiz) — Blueprint do serviço da API. `buildCommand` roda
-  `prisma migrate deploy` a cada deploy. Health check em `/health`. Secrets
-  (`DATABASE_URL`, `DIRECT_URL`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`,
+  `prisma migrate deploy` a cada deploy, **enquanto a versão anterior ainda
+  atende** — por isso mudança de banco que remove coluna vai em dois PRs
+  (expandir → contrair), como no R1. Health check em `/health` (fora do rate
+  limit). Secrets (`DATABASE_URL`, `DIRECT_URL`, `JWT_ACCESS_SECRET`,
   `CORS_ORIGIN`, `SEED_*`) preenchidos manualmente no dashboard do Render,
-  nunca ficam no git.
+  nunca ficam no git. `TRUST_PROXY_HOPS: 1` vem do próprio `render.yaml`.
 - **`apps/web/vercel.json`** — build/install/output pro monorepo pnpm+Turborepo
   + rewrite de SPA (ver bug acima). Root Directory = `apps/web` no projeto Vercel.
-- **`.github/workflows/ci.yml`** — lint + typecheck + build em todo push/PR pra
-  `main`, antes de qualquer deploy.
+- **`.github/workflows/ci.yml`** — lint + typecheck + build + **`pnpm test`**
+  (suíte e2e com Postgres de serviço) em todo push/PR pra `main`. A `main` só
+  aceita merge via PR (Repository Ruleset).
+
+## Deploy de 2026-09-26 — o que conferir no Render
+
+Entraram na `main` os PRs #13–#19 (Fase 0 de segurança, matriz de acesso e
+R1 parte 1). Ao subir:
+- **Todos os usuários logados precisam entrar de novo** (S3): o cookie antigo
+  era um JWT de refresh e não corresponde a nenhuma `RefreshSession`; o
+  primeiro refresh responde 401 e apaga o cookie.
+- **Apagar a env var `JWT_REFRESH_SECRET`** do Render: não é mais lida. (Em
+  2026-09-26 o valor de produção apareceu na saída de uma sessão do Claude
+  Code ao grepar o repositório local; não foi enviado a lugar nenhum, mas por
+  isso mesmo vale apagá-lo.)
+- **Conferir o `req.ip`** nos logs depois do deploy: `TRUST_PROXY_HOPS=1`
+  supõe um proxy só na frente da API. Com 2 saltos (ex.: Cloudflare), todo
+  mundo ficaria com o mesmo IP e dividiria o rate limit.
+- Migrations novas aplicadas no build: `add_refresh_sessions` (S3) e
+  `add_user_roles` (R1, só adiciona e preenche).
+- ✅ Deploy do #19/#21 ficou *Live* em 2026-09-26 (produção já respondia com
+  a CSP nova do helmet). Só então o **PR #20** (R1 parte 2) foi mergeado; o
+  deploy dele aplica `drop_user_role` (repreenche retardatários e faz `DROP
+  COLUMN "role"`). **Conferir que esse deploy também ficou Live.**
 
 ## Credenciais de teste
 
@@ -118,10 +170,15 @@ acima antes de rodar via `source`).
 - `DATABASE_URL` — transaction pooler (porta 6543, `?pgbouncer=true`).
   `DIRECT_URL` — session pooler (porta 5432). Conexão direta do Supabase é
   IPv6-only e falha do Render/máquina local, por isso os poolers.
-- `JWT_ACCESS_SECRET`/`JWT_REFRESH_SECRET` — gerados com
-  `crypto.randomBytes(32).toString("hex")`; os de produção são diferentes dos
-  de dev (nunca reusar).
+- `JWT_ACCESS_SECRET` — gerado com `crypto.randomBytes(32).toString("hex")`;
+  o de produção é diferente do de dev (nunca reusar). `JWT_REFRESH_SECRET`
+  **não existe mais** desde o S3 (refresh token é opaco, guardado como hash
+  no banco).
 - `CORS_ORIGIN` — dev: `http://localhost:5173`; prod: URL da Vercel.
+- `TRUST_PROXY_HOPS` — opcional, padrão `1`: quantos proxies ficam na frente
+  da API (define o IP do cliente pro rate limit).
+- `RATE_LIMIT_DISABLED` — **só testes** (`test/env-setup.ts`); nunca definir em
+  produção.
 - `SEED_ADMIN_*`/`SEED_DENTIST_*` — só usados pelo `seed.ts`; se email/senha
   não definidos, o seed pula aquele usuário sem quebrar.
 

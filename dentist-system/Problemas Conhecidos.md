@@ -45,6 +45,43 @@ Vercel/Render de produção.
 Corrigido reaproveitando as mesmas opções (`getRefreshCookieOptions()`) tanto na
 criação quanto na limpeza do cookie, pra nunca mais divergir.
 
+### Prisma 5.22: duas transações interativas na mesma linha → 500 (P2028) (2026-09-26, S3)
+Achado no teste no Chrome do refresh rotativo: várias abas abrindo juntas
+mandavam o mesmo refresh token, e uma delas recebia **500** (`Transaction API
+error: Unable to start a transaction in the given time`, código `P2028`) em
+vez de 401. Reproduzido com o **Prisma puro, fora do Nest**: quando duas
+transações interativas (`$transaction(async (tx) => …)`) disputam a mesma
+linha, a segunda falha depois de 2 s (o `maxWait` padrão) em vez de esperar o
+lock, que dura milissegundos. Acontece também com `connection_limit` alto.
+
+Corrigido sem transação interativa: a sessão é reivindicada com um único
+`UPDATE … WHERE revokedAt IS NULL` (atômico no Postgres; quem perde recebe
+`count = 0` e é tratado como reuso → 401), e só depois a próxima sessão e o
+`replacedById` são gravados numa **transação em lote** (`$transaction([...])`).
+Teste e2e: dois refresh simultâneos com o mesmo token dão exatamente um 201 e
+um 401, em 5 rodadas. **Regra pro projeto:** em código com concorrência na
+mesma linha, preferir UPDATE condicional + transação em lote.
+
+Efeito colateral que o mesmo teste mostrou: o controller apagava o cookie de
+refresh em **qualquer** erro, então o 500 deslogava a aba seguinte. Agora só
+apaga em 401.
+
+### 401 do login reativava uma sessão antiga (2026-09-26, visto no S1, corrigido no S3)
+O `api-client` do front tentava `auth/refresh` em **qualquer** 401, inclusive
+no do próprio `POST /auth/login`. Se ainda existisse um cookie de sessão antiga
+no navegador, uma tentativa de login com senha errada renovava essa sessão
+antiga em memória. Corrigido: `/auth/login` e `/auth/refresh` não disparam
+refresh no 401.
+
+### Modal deslocado 24 px pelo `space-y-*` do container (2026-09-26, PR #21)
+O diálogo de confirmação de Admin, renderizado dentro da página, herdava o
+`margin-top` do `space-y-6` (o Tailwind põe margem em todo filho, inclusive
+um `fixed inset-0`), e o fundo escuro não cobria o topo da tela. Achado
+medindo no navegador (`getBoundingClientRect().top === 24`, `marginTop:
+24px`). Corrigido com **portal no `<body>`** (`createPortal`). Os modais da
+Agenda usam o mesmo padrão `fixed inset-0` dentro da página — conferir se
+aparecerem deslocados.
+
 ## Avisos do editor que NÃO são bugs (já investigados, pode ignorar)
 
 ### VS Code marca `url`/`directUrl` do `schema.prisma` como erro
@@ -93,7 +130,21 @@ nunca rola) e `<main>` ganhou `min-h-0` (permite o flex item encolher e o
   cadastro/cor de dentista) é maquete. Ver [[Roadmap]] pra escopo de quando
   isso vira backend de verdade, e [[Arquitetura]] pro padrão técnico usado.
   **Consequência concreta**: `GET /appointments` (backend real) continua
-  `@Roles("DENTIST", "RECEPTIONIST")` — ADMIN só ganhou acesso de leitura a
-  `/clinics`, `/patients`, `/procedures` (pro picker do modal mockado
-  funcionar), **não** a `/appointments`. Se a Agenda virar real um dia, tem
-  que lembrar de estender esse `@Roles` também.
+  restrito a DENTIST/RECEPTIONIST (capacidade `appointments.manage` na matriz
+  `ACCESS`) — ADMIN só ganhou acesso de leitura a `/clinics`, `/patients`,
+  `/procedures` (pro picker do modal mockado funcionar), **não** a
+  `/appointments`. Se a Agenda virar real (Fase 4 do
+  [[roadmap-papeis-permissoes-financeiro]]), lembrar de rever
+  `appointments.manage` no `ACCESS`.
+- **Rate limit em memória e por IP** (S2): com mais de uma instância da API
+  cada uma conta separado (precisaria de Redis); e numa clínica em que todos
+  saem pelo mesmo IP, 5 logins errados de uma pessoa travam o login de todos
+  por 1 minuto.
+- **Access token continua valendo até 15 min** depois de logout, `logout-all`
+  ou desativação — só o refresh para de funcionar (S3). Redefinir a senha pelo
+  admin **não** derruba as sessões (não era escopo do S3; vale considerar).
+- **Tabela `RefreshSession` cresce** uma linha por refresh; as expiradas só são
+  apagadas no próximo login do próprio usuário.
+- **`GET /organization` do Super Admin responde 400** (não 403): a rota é
+  `@AllowAuthenticated` e o 400 vem de dentro do controller. Mantido assim de
+  propósito na matriz `ACCESS` (PR #18) pra não mudar comportamento.

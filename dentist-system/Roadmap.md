@@ -6,6 +6,12 @@ em [[Visão Geral]]) — todas as fases sugeridas lá já foram implementadas,
 incluindo as que o próprio prompt dizia que podiam ficar pra "segunda
 iteração" (odontograma e retorno).
 
+> **Desde 2026-09-25 o roadmap ativo é [[roadmap-papeis-permissoes-financeiro]]**
+> (papéis, permissões e financeiro — fases 0 a 7, com progresso por item e
+> PRs). Esta nota segue como histórico do que foi construído até lá, mais a
+> evolução SaaS e a visão de produto. A Fase 0 (segurança) e o R1 (múltiplos
+> papéis) de lá já estão na `main` — resumo em "Feito" abaixo.
+
 Esta nota é o **roadmap de verdade** — o que já foi construído e o que está
 priorizado pra construir a seguir, incluindo a visão de produto mais ampla
 (comparativo com concorrentes) e a evolução SaaS de infraestrutura, ambas
@@ -203,6 +209,17 @@ abaixo.
       (quem aparece na sidebar) virou real, ver "Em planejamento" abaixo.
 - [x] **4 PRs (#9–#12) mergeados em `main`** (2026-09-22) — sequência
       completa, todos com CI verde, sem conflito.
+
+- [x] **Fase 0 de segurança + matriz de acesso + múltiplos papéis**
+      (2026-09-26, PRs #13–#21) — itens do
+      [[roadmap-papeis-permissoes-financeiro]]: cobertura do isolamento
+      (#13), RBAC negando por padrão (#14), login sem `auth/lookup` (#15),
+      rate limit + helmet (#16), refresh token revogável com rotação (#17),
+      matriz `ACCESS` centralizada (#18), `User.roles` (#19) e confirmação ao
+      dar/tirar Admin (#21), e remoção da coluna antiga `User.role` (#20,
+      mergeado depois do deploy do #19). Detalhes em [[Arquitetura]] e
+      [[Funcionalidades e Endpoints]]; avisos de deploy em
+      [[Infraestrutura e Deploy]].
 
 ## Evolução SaaS (infraestrutura/multi-tenant, fases)
 
